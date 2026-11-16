@@ -182,8 +182,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         startRestoreScheduler()
         log("Restore scheduler started (\(restoreCountdownAfterDisplayChange) countdown after display changes)")
 
-        // Start display monitor
-        startDisplayMonitor()
+        // Start display monitor. This delegate method cannot throw, so a failed registration stops
+        // the app here with the error rather than running on without automatic restore.
+        try! startDisplayMonitor()
+        log("Display monitor started")
 
         // Start space monitor
         startSpaceMonitor()
@@ -494,7 +496,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         )
     }
 
-    private func startDisplayMonitor() {
+    private func startDisplayMonitor() throws {
         displayMonitor = DisplayMonitor(
             onDisplayReconfiguration: { [weak self] event in
                 Task { @MainActor in
@@ -509,12 +511,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         )
 
-        do {
-            try displayMonitor?.start()
-            log("Display monitor started")
-        } catch {
-            AppLogger.log("Display monitor failed to start, automatic restore on monitor changes is OFF: \(error)", category: AppLogger.monitor, level: .error)
-        }
+        try displayMonitor?.start()
     }
 
     private func startSpaceMonitor() {
