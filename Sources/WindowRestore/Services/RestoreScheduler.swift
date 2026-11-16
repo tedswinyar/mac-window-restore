@@ -8,12 +8,16 @@ import Foundation
 /// matching the previous behaviour in which an unchanged screen count did nothing.
 ///
 /// A desktop (Space) change restores after a short delay when no countdown is running. While a
-/// countdown is running the desktop change is absorbed: the countdown keeps its deadline and the
-/// restore it produces covers the new desktop too.
+/// countdown is running the desktop change is absorbed: the countdown keeps its deadline and
+/// remembers the desktop change. A display event that cancels a pending desktop-change restore
+/// hands that desktop change to the countdown in the same way. When the countdown expires, a
+/// remembered desktop change justifies the restore if the desktop toggle is enabled, so a countdown
+/// in which no display was added or removed still restores for it.
 ///
 /// Serialization follows from the shape: there is at most one countdown task and at most one
 /// desktop-change task, a display event cancels any pending desktop-change restore, and the restore
-/// callback itself runs synchronously on the main actor.
+/// callback itself runs synchronously on the main actor. One expiry runs at most one restore,
+/// whatever the number of reasons for it.
 @MainActor
 public final class RestoreScheduler<SchedulerClock: Clock> where SchedulerClock.Duration == Duration {
 
@@ -39,6 +43,7 @@ public final class RestoreScheduler<SchedulerClock: Clock> where SchedulerClock.
     private var countdownTask: Task<Void, Never>?
     private var countdownGeneration = 0
     private var directionsSeen: Set<DisplayReconfigurationEvent.Direction> = []
+    private var desktopChangeAbsorbed = false
 
     private var desktopChangeTask: Task<Void, Never>?
     private var desktopChangeGeneration = 0
@@ -81,7 +86,8 @@ public final class RestoreScheduler<SchedulerClock: Clock> where SchedulerClock.
         if desktopChangeTask != nil {
             desktopChangeTask?.cancel()
             desktopChangeTask = nil
-            log("Display changed while a desktop-change restore was pending: the countdown replaces it")
+            desktopChangeAbsorbed = true
+            log("Display changed while a desktop-change restore was pending: the countdown takes it over")
         }
 
         countdownTask?.cancel()
@@ -105,7 +111,8 @@ public final class RestoreScheduler<SchedulerClock: Clock> where SchedulerClock.
     /// The active desktop (Space) changed.
     public func desktopDidChange() {
         if isCountdownRunning {
-            log("Desktop changed during a restore countdown: absorbed, the countdown keeps its deadline")
+            desktopChangeAbsorbed = true
+            log("Desktop changed during a restore countdown: absorbed, the countdown keeps its deadline and remembers the desktop change")
             return
         }
 
@@ -136,6 +143,7 @@ public final class RestoreScheduler<SchedulerClock: Clock> where SchedulerClock.
         countdownTask = nil
         countdownGeneration += 1
         directionsSeen = []
+        desktopChangeAbsorbed = false
 
         desktopChangeTask?.cancel()
         desktopChangeTask = nil
@@ -146,18 +154,31 @@ public final class RestoreScheduler<SchedulerClock: Clock> where SchedulerClock.
         countdownTask = nil
         let seen = directionsSeen
         directionsSeen = []
+        let absorbedDesktopChange = desktopChangeAbsorbed
+        desktopChangeAbsorbed = false
 
         let toggles = readToggles()
         let connectJustifies = seen.contains(.connect) && toggles.restoreOnConnect
         let disconnectJustifies = seen.contains(.disconnect) && toggles.restoreOnDisconnect
+        let desktopChangeJustifies = absorbedDesktopChange && toggles.restoreOnDesktopChange
 
         if connectJustifies || disconnectJustifies {
             log("Restore countdown expired: restoring (saw \(describe(seen)))")
             onRestore()
-        } else if seen.isEmpty {
-            log("Restore countdown expired: displays moved or changed mode but none was added or removed, not restoring")
+        } else if desktopChangeJustifies {
+            let displayOutcome = seen.isEmpty
+                ? "no display was added or removed"
+                : "saw \(describe(seen)) but the matching toggles are off"
+            log("Restore countdown expired: \(displayOutcome), restoring for the desktop change absorbed during the countdown")
+            onRestore()
         } else {
-            log("Restore countdown expired: saw \(describe(seen)) but the matching toggles are off, not restoring")
+            let displayOutcome = seen.isEmpty
+                ? "displays moved or changed mode but none was added or removed"
+                : "saw \(describe(seen)) but the matching toggles are off"
+            let desktopOutcome = absorbedDesktopChange
+                ? ", and the desktop change absorbed during the countdown has its toggle off"
+                : ""
+            log("Restore countdown expired: \(displayOutcome)\(desktopOutcome), not restoring")
         }
     }
 

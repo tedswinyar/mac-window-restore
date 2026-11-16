@@ -72,7 +72,7 @@ Sources/WindowRestore/
 | Auto-save | `SnapshotScheduler` with configurable interval (UserDefaults) |
 | Pause Saving | Stops `SnapshotScheduler`, session-only (not persisted) |
 | Auto-restore | `DisplayMonitor` events restart a 10 s countdown in `RestoreScheduler`; one restore runs when it expires, if a display was added (connect toggle) or removed (disconnect toggle) during the countdown |
-| Restore on desktop change | `SpaceMonitor` → `RestoreScheduler`, 500 ms delay; absorbed while a display countdown is running |
+| Restore on desktop change | `SpaceMonitor` → `RestoreScheduler`, 500 ms delay; absorbed while a display countdown is running, and the countdown then restores when it expires if the desktop toggle is on, even if no display was added or removed |
 | Auto-restore toggles | UserDefaults `RestoreOnConnectEnabled` and `RestoreOnDisconnectEnabled`, both default true |
 | Keyboard shortcuts | Configurable via `KeyboardShortcutManager` using KeyboardShortcuts library |
 | Save Frequency menu | 15s, 30s, 1min, 2min, 5min options |

@@ -139,6 +139,10 @@ final class SchedulerHarness {
     func moved(_ display: UInt32) -> DisplayReconfigurationEvent {
         DisplayReconfigurationEvent(displayIdentifier: display, kind: .moved)
     }
+
+    func modeChanged(_ display: UInt32) -> DisplayReconfigurationEvent {
+        DisplayReconfigurationEvent(displayIdentifier: display, kind: .modeChanged)
+    }
 }
 
 @Suite("RestoreScheduler Tests")
@@ -345,6 +349,194 @@ struct RestoreSchedulerTests {
         }
         #expect(!harness.scheduler.isCountdownRunning)
         await harness.advance(by: .seconds(60))
+        #expect(harness.restoreCount == 0)
+    }
+
+    // MARK: - A desktop change absorbed by a countdown
+
+    @Test("A desktop change absorbed by a countdown that expires without a direction still restores")
+    func absorbedDesktopChangeRestoresWhenCountdownExpiresWithoutDirection() async {
+        let harness = SchedulerHarness()
+
+        // A resolution change, then a desktop switch three seconds later.
+        harness.scheduler.displayDidChange(harness.modeChanged(1))
+        await harness.settle(expectingSleepers: 1)
+        await harness.advance(by: .seconds(3))
+
+        harness.scheduler.desktopDidChange()
+        await harness.settle(expectingSleepers: 1)
+        await harness.advance(by: .seconds(6))
+        #expect(harness.restoreCount == 0, "the countdown kept its original deadline")
+
+        await harness.advance(by: .seconds(1))
+        #expect(harness.restoreCount == 1, "no display was added or removed, so the desktop change is the reason")
+        #expect(harness.logLines.last == "Restore countdown expired: no display was added or removed, restoring for the desktop change absorbed during the countdown")
+
+        await harness.advance(by: .seconds(60))
+        #expect(harness.restoreCount == 1, "nothing else may fire later")
+    }
+
+    @Test("A pending desktop-change restore cancelled by a display event runs when the countdown expires without a direction")
+    func cancelledDesktopRestoreRunsWhenCountdownExpiresWithoutDirection() async {
+        let harness = SchedulerHarness()
+
+        harness.scheduler.desktopDidChange()
+        await harness.settle(expectingSleepers: 1)
+        await harness.advance(by: .milliseconds(200))
+
+        harness.scheduler.displayDidChange(harness.moved(1))
+        await harness.settle(expectingSleepers: 1)
+        await harness.advance(by: .seconds(1))
+        #expect(harness.restoreCount == 0, "the short-delay restore was cancelled")
+
+        await harness.advance(by: .seconds(9))
+        #expect(harness.restoreCount == 1, "the countdown ran the restore the desktop change was owed")
+
+        await harness.advance(by: .seconds(60))
+        #expect(harness.restoreCount == 1, "nothing else may fire later")
+    }
+
+    @Test("An absorbed desktop change survives the countdown being restarted")
+    func absorbedDesktopChangeSurvivesCountdownRestart() async {
+        let harness = SchedulerHarness()
+
+        harness.scheduler.displayDidChange(harness.modeChanged(1))
+        await harness.settle(expectingSleepers: 1)
+        await harness.advance(by: .seconds(2))
+        harness.scheduler.desktopDidChange()
+        await harness.settle(expectingSleepers: 1)
+        await harness.advance(by: .seconds(3))
+
+        harness.scheduler.displayDidChange(harness.moved(1))
+        await harness.settle(expectingSleepers: 1)
+        await harness.advance(by: .seconds(9))
+        #expect(harness.restoreCount == 0, "the countdown must run from the LAST event")
+
+        await harness.advance(by: .seconds(1))
+        #expect(harness.restoreCount == 1)
+    }
+
+    @Test("An absorbed desktop change restores even when the direction seen has its toggle off")
+    func absorbedDesktopChangeRestoresWhenSeenDirectionIsDisabled() async {
+        let harness = SchedulerHarness()
+        harness.toggles.restoreOnConnect = false
+
+        harness.scheduler.displayDidChange(harness.added(2))
+        await harness.settle(expectingSleepers: 1)
+        harness.scheduler.desktopDidChange()
+        await harness.settle(expectingSleepers: 1)
+        await harness.advance(by: .seconds(10))
+
+        #expect(harness.restoreCount == 1, "the desktop toggle is on and a desktop change was absorbed")
+        #expect(harness.logLines.last == "Restore countdown expired: saw a display added but the matching toggles are off, restoring for the desktop change absorbed during the countdown")
+    }
+
+    @Test("An absorbed desktop change and an enabled direction produce one restore, not two")
+    func absorbedDesktopChangeAndEnabledDirectionRestoreOnce() async {
+        let harness = SchedulerHarness()
+
+        harness.scheduler.desktopDidChange()
+        await harness.settle(expectingSleepers: 1)
+        harness.scheduler.displayDidChange(harness.removed(2))
+        await harness.settle(expectingSleepers: 1)
+        harness.scheduler.desktopDidChange()
+        await harness.settle(expectingSleepers: 1)
+        await harness.advance(by: .seconds(10))
+        #expect(harness.restoreCount == 1)
+        #expect(harness.logLines.last == "Restore countdown expired: restoring (saw a display removed)")
+
+        await harness.advance(by: .seconds(60))
+        #expect(harness.restoreCount == 1, "the desktop change adds no restore of its own")
+    }
+
+    @Test("An absorbed desktop change does not restore when the desktop toggle is off at expiry")
+    func absorbedDesktopChangeDoesNotRestoreWhenToggleIsOffAtExpiry() async {
+        let harness = SchedulerHarness()
+
+        // The toggle was on when the short-delay restore was scheduled and is off when the countdown expires.
+        harness.scheduler.desktopDidChange()
+        await harness.settle(expectingSleepers: 1)
+        harness.scheduler.displayDidChange(harness.modeChanged(1))
+        await harness.settle(expectingSleepers: 1)
+        harness.toggles.restoreOnDesktopChange = false
+        await harness.advance(by: .seconds(10))
+
+        #expect(harness.restoreCount == 0)
+        #expect(harness.logLines.last == "Restore countdown expired: displays moved or changed mode but none was added or removed, and the desktop change absorbed during the countdown has its toggle off, not restoring")
+    }
+
+    @Test("Nothing restores when every toggle is off")
+    func nothingRestoresWhenEveryToggleIsOff() async {
+        let harness = SchedulerHarness()
+        harness.toggles.restoreOnConnect = false
+        harness.toggles.restoreOnDisconnect = false
+        harness.toggles.restoreOnDesktopChange = false
+
+        harness.scheduler.displayDidChange(harness.removed(2))
+        harness.scheduler.displayDidChange(harness.added(2))
+        await harness.settle(expectingSleepers: 1)
+        harness.scheduler.desktopDidChange()
+        await harness.settle(expectingSleepers: 1)
+        await harness.advance(by: .seconds(10))
+
+        #expect(harness.restoreCount == 0)
+        #expect(harness.logLines.last == "Restore countdown expired: saw a display added and a display removed but the matching toggles are off, and the desktop change absorbed during the countdown has its toggle off, not restoring")
+
+        await harness.advance(by: .seconds(60))
+        #expect(harness.restoreCount == 0)
+    }
+
+    @Test("An absorbed desktop change is forgotten once the countdown has expired")
+    func absorbedDesktopChangeIsForgottenAfterExpiry() async {
+        let harness = SchedulerHarness()
+
+        harness.scheduler.displayDidChange(harness.modeChanged(1))
+        await harness.settle(expectingSleepers: 1)
+        harness.scheduler.desktopDidChange()
+        await harness.settle(expectingSleepers: 1)
+        await harness.advance(by: .seconds(10))
+        #expect(harness.restoreCount == 1)
+
+        harness.scheduler.displayDidChange(harness.modeChanged(1))
+        await harness.settle(expectingSleepers: 1)
+        await harness.advance(by: .seconds(10))
+        #expect(harness.restoreCount == 1, "a later neutral-only storm must not inherit the earlier desktop change")
+    }
+
+    @Test("An absorbed desktop change is forgotten at expiry even when it did not restore")
+    func absorbedDesktopChangeIsForgottenWhenItDidNotRestore() async {
+        let harness = SchedulerHarness()
+        harness.toggles.restoreOnDesktopChange = false
+
+        harness.scheduler.displayDidChange(harness.modeChanged(1))
+        await harness.settle(expectingSleepers: 1)
+        harness.scheduler.desktopDidChange()
+        await harness.settle(expectingSleepers: 1)
+        await harness.advance(by: .seconds(10))
+        #expect(harness.restoreCount == 0)
+
+        harness.toggles.restoreOnDesktopChange = true
+        harness.scheduler.displayDidChange(harness.modeChanged(1))
+        await harness.settle(expectingSleepers: 1)
+        await harness.advance(by: .seconds(10))
+        #expect(harness.restoreCount == 0, "the desktop change belonged to the countdown that already expired")
+    }
+
+    @Test("Cancelling pending restores forgets an absorbed desktop change")
+    func cancelForgetsAbsorbedDesktopChange() async {
+        let harness = SchedulerHarness()
+
+        harness.scheduler.displayDidChange(harness.modeChanged(1))
+        await harness.settle(expectingSleepers: 1)
+        harness.scheduler.desktopDidChange()
+        harness.scheduler.cancelPendingRestores()
+        for _ in 0..<20 {
+            await Task.yield()
+        }
+
+        harness.scheduler.displayDidChange(harness.modeChanged(1))
+        await harness.settle(expectingSleepers: 1)
+        await harness.advance(by: .seconds(10))
         #expect(harness.restoreCount == 0)
     }
 }
